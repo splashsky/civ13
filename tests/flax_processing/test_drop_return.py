@@ -115,7 +115,7 @@ class HumanDropReturnContracts(unittest.TestCase):
         for marker in ('Floor-drop control', 'Rejected rack transfer', 'Redirected transfer', 'storage contents'):
             self.assertIn(marker, rack)
 
-    def test_existing_flax_fixture_is_explicitly_not_production_inventory_acceptance(self):
+    def test_existing_direct_soak_adapter_is_not_production_inventory_acceptance(self):
         fixture = source('tests/flax_processing/probe.dm')
         adapter = block(fixture, '/mob/living/human/flax_tester/drop_from_inventory')
         self.assertIn('return TRUE', adapter)
@@ -123,6 +123,25 @@ class HumanDropReturnContracts(unittest.TestCase):
         proposal = source('tests/flax_processing/drop-return-acceptance.md')
         self.assertIn('Do not use `flax_tester`', proposal)
         self.assertIn('afterattack', proposal)
+
+    def test_drop_entry_fixture_keeps_production_dispatch_and_legacy_control(self):
+        fixture = source('tests/flax_processing/probe.dm')
+        entry = block(fixture, '/proc/flax_drop_entry_regressions')
+        self.assertIn('raw.tie_bundle(U)', entry)
+        self.assertIn('U.put_in_r_hand(B)', entry)
+        self.assertIn('B.afterattack(W, U, TRUE)', entry)
+        self.assertIn('flax_drop_wait_entered(U, B, W)', entry)
+        self.assertIn('!flax_drop_wait_entered(legacy, B, W)', entry)
+        self.assertIn('U.drop_waits == 1', entry)
+        self.assertIn('internal-organ exclusion preserves inventory', entry)
+        self.assertIn('external-organ exclusion preserves inventory', entry)
+        self.assertIn('left-hand flax enters soaking wait', entry)
+        self.assertIn('denied move never enters soaking', entry)
+        self.assertIn('redirected move never enters soaking', entry)
+        self.assertIn('legacy return control drops without entering wait', entry)
+        self.assertNotIn('/mob/living/human/flax_drop_tester/drop_from_inventory(', fixture)
+        legacy = block(fixture, '/mob/living/human/flax_drop_tester/legacy_return/drop_from_inventory')
+        self.assertEqual(legacy.splitlines()[-1], '\t..()')
 
 
 if __name__ == '__main__':

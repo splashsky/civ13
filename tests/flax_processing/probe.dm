@@ -69,6 +69,87 @@
 		return do_after(src, 4, target, progress = FALSE)
 	return TRUE
 
+// Keep production pickup, human drop dispatch and bundle afterattack intact.
+// Only human startup and the soaking wait are adapted for the isolated fixture.
+/mob/living/human/flax_drop_tester
+	var/drop_waits = 0
+
+/mob/living/human/flax_drop_tester/New()
+	species = new /datum/species/human
+	body_build = new /datum/body_build
+
+/mob/living/human/flax_drop_tester/flax_processing_wait(delay, atom/target)
+	drop_waits++
+	return FALSE
+
+// The historical wrapper drops the item but discards the parent's result.
+/mob/living/human/flax_drop_tester/legacy_return/drop_from_inventory(obj/item/W, atom/Target = null)
+	..()
+
+/obj/item/flax_bundle/flax_drop_denied/forceMove(atom/destination, special_event)
+	if (istype(destination, /turf/floor/beach/water))
+		return FALSE
+	return ..()
+
+/obj/item/flax_bundle/flax_drop_redirected/forceMove(atom/destination, special_event)
+	if (istype(destination, /turf/floor/beach/water))
+		return ..(locate(5,3,1), special_event)
+	return ..()
+
+/proc/flax_drop_wait_entered(mob/living/human/flax_drop_tester/U, obj/item/flax_bundle/B, turf/floor/beach/water/W)
+	return B.loc == W && !U.item_is_in_hands(B) && U.drop_waits == 1
+
+/proc/flax_drop_entry_regressions(turf/site)
+	var/turf/floor/beach/water/W = new(locate(4,3,1))
+	var/mob/living/human/flax_drop_tester/U = new(site)
+	var/obj/item/stack/material/flax/raw = new(U, 2, FALSE)
+	flax_assert(raw.tie_bundle(U), "production human ties paid flax")
+	var/obj/item/flax_bundle/B = locate() in U
+	if (B)
+		flax_assert(U.drop_from_inventory(B, site), "tied bundle can be placed before pickup")
+	else
+		B = locate() in site
+	flax_assert(B && U.put_in_r_hand(B) && B.loc == U, "production human picks up tied bundle")
+	B.afterattack(W, U, TRUE)
+	flax_assert(flax_drop_wait_entered(U, B, W), "held flax enters soaking wait after successful drop")
+	flax_assert(B.soak_stage == 0 && !B.soaking && !flax_amount(W, /obj/item/stack/rotten_flax), "interrupted drop preserves the paid bundle")
+	qdel(B)
+
+	B = new(site)
+	flax_assert(U.put_in_l_hand(B), "production human picks up refused bundle")
+	B.nodrop = TRUE
+	B.afterattack(W, U, TRUE)
+	flax_assert(B.loc == U && U.item_is_in_hands(B) && U.drop_waits == 1, "nodrop refusal never enters soaking")
+	B.nodrop = FALSE
+	U.organs += B
+	flax_assert(!U.drop_from_inventory(B, W) && B.loc == U, "external-organ exclusion preserves inventory")
+	U.organs -= B
+	U.internal_organs += B
+	flax_assert(!U.drop_from_inventory(B, W) && B.loc == U, "internal-organ exclusion preserves inventory")
+	U.internal_organs -= B
+	B.afterattack(W, U, TRUE)
+	flax_assert(B.loc == W && !U.item_is_in_hands(B) && U.drop_waits == 2, "left-hand flax enters soaking wait")
+	qdel(B)
+	var/obj/item/flax_bundle/flax_drop_denied/denied = new(site)
+	flax_assert(U.put_in_r_hand(denied), "production human picks up denied bundle")
+	denied.afterattack(W, U, TRUE)
+	flax_assert(denied.loc == site && !U.item_is_in_hands(denied) && U.drop_waits == 2, "denied move never enters soaking")
+	qdel(denied)
+	var/obj/item/flax_bundle/flax_drop_redirected/redirected = new(site)
+	flax_assert(U.put_in_r_hand(redirected), "production human picks up redirected bundle")
+	redirected.afterattack(W, U, TRUE)
+	flax_assert(redirected.loc == locate(5,3,1) && U.drop_waits == 2, "redirected move never enters soaking")
+	qdel(redirected)
+	qdel(U)
+
+	var/mob/living/human/flax_drop_tester/legacy_return/legacy = new(site)
+	B = new(site)
+	flax_assert(legacy.put_in_r_hand(B), "legacy control picks up bundle")
+	B.afterattack(W, legacy, TRUE)
+	flax_assert(B.loc == W && !legacy.item_is_in_hands(B) && !flax_drop_wait_entered(legacy, B, W), "legacy return control drops without entering wait")
+	qdel(B)
+	qdel(legacy)
+
 /proc/flax_assert(condition, message)
 	if (!condition)
 		throw EXCEPTION(message)
@@ -109,6 +190,7 @@
 		var/mob/living/human/flax_tester/U = new(site)
 		map = new /obj/map_metadata/flax_tester
 		map.ordinal_age = 0
+		flax_drop_entry_regressions(site)
 		build_research_tree()
 		craftlist_lists["global"] = list()
 		for (var/line in file2list("config/crafting/material_recipes_global.txt", "\n"))

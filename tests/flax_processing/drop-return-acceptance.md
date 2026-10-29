@@ -1,7 +1,25 @@
 # Issue #3322 source review and remaining acceptance
 
+## Later fixture preparation (2026-10-29)
+
+`probe.dm` now includes a separate `flax_drop_tester` that retains the production
+human pickup and drop dispatch and the bundle's `afterattack`, while adapting
+only human startup and the soaking wait. It checks a paid tied bundle, wait
+entry, interruption, nodrop, both organ lists, denied/redirected movement, and
+the discarded-return control against the same wait-entry predicate. The original
+`flax_tester` and its direct soaking checks remain separate.
+
+The updated full fixture compiled with BYOND 516.1688, zero errors and warnings.
+An isolated OpenDream run of the entry portion passed, with 78 compiler warnings
+from the game source. Neither result proves native BYOND dispatch or connected
+inventory/HUD behavior; the independently reviewed native acceptance below and
+its execution admission remain necessary. The first OpenDream attempt used an
+incorrect denied-move expectation; it failed and was corrected to reflect the
+production drop's floor staging rather than being counted as a pass.
+
 Source-only proposal. No native compiler, daemon, client, capture or workflow
-was run for this change. Main owns independent review and any later admission.
+was run for the original proposal below. Main owns independent review and any
+later admission.
 
 ## Decision and dispatch boundary
 

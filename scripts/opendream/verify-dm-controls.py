@@ -37,6 +37,15 @@ def main():
     maxz = 1
 /proc/log_debug(message)
     return
+/datum/opendream_control_fixture_restart
+    var/busy = FALSE
+    var/startup_hold = FALSE
+    var/expected_generation
+var/datum/opendream_control_fixture_restart/persistence_restart = new
+/proc/trim(value)
+    return value
+/proc/message_admins(message)
+    return
 /world/New()
     var/list/results = list()
 #ifdef OPENDREAM
@@ -54,6 +63,16 @@ def main():
     results["commit_marker"] = fexists("SQL/opendream-control/game-ready")
     fdel("SQL/opendream-control/game-request.json")
     fdel("SQL/opendream-control/game-ready")
+    persistence_restart.busy = TRUE
+    world.Reboot("blocked test")
+    results["busy_reboot_blocked"] = !fexists("SQL/opendream-control/game-ready")
+    persistence_restart.busy = FALSE
+    persistence_restart.startup_hold = TRUE
+    world.Reboot("hold test")
+    results["held_reboot_blocked"] = !fexists("SQL/opendream-control/game-ready")
+    persistence_restart.startup_hold = FALSE
+    world.Reboot("invalid generation", "wrong")
+    results["invalid_recovery_blocked"] = !fexists("SQL/opendream-control/game-ready")
     world.Reboot("isolated test")
     results["world_reboot_marker"] = fexists("SQL/opendream-control/game-ready")
     var/list/filtering_whitelist = list("127.0.0.1")

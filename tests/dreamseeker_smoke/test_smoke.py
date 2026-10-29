@@ -5,12 +5,14 @@ import copy
 import fnmatch
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import re
 import tempfile
 import time
 import uuid
+from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from PIL import Image
@@ -363,7 +365,8 @@ class LocalRunOrchestrationContracts(unittest.TestCase):
         if wall:
             self.clock.utc += seconds
 
-    def invoke(self, hooks=None, module=run, budget=None, exit_phases=()):
+    def invoke(self, hooks=None, module=run, budget=None, exit_phases=(),
+               capture_success=False, finish_fixture=True, exit_after_capture=False):
         hooks = hooks or {}
         record = {'creations': [], 'argv': [], 'opened': [], 'cleanup': [], 'sockets': [], 'capture': 0}
         reviewed = self.write_packet()
@@ -409,6 +412,12 @@ class LocalRunOrchestrationContracts(unittest.TestCase):
             def sockets(_):
                 record['sockets'].append((phase, self.clock.mono, self.clock.utc))
                 hook('sockets', phase)
+                fixture = self.output.parent / (self.output.name + '-private-work') / 'fixture'
+                if (capture_success and finish_fixture and phase == 'server'
+                        and (fixture / 'blue-captured.txt').exists()
+                        and not (fixture / 'complete.txt').exists()):
+                    (fixture / 'complete.txt').write_text(
+                        'complete' if finish_fixture is True else str(finish_fixture))
                 return [dict(protocol='tcp', address='127.0.0.1', remote='0.0.0.0',
                              port=1234, state='listen')] if phase == 'server' else []
 
@@ -417,7 +426,9 @@ class LocalRunOrchestrationContracts(unittest.TestCase):
             adapter.cleanup.side_effect = cleanup
             adapter.free.side_effect = free
             adapter.exited.side_effect = lambda _: phase == 'compile' or (
-                phase in exit_phases and len(record['creations']) == 3)
+                phase in exit_phases and len(record['creations']) == 3) or (
+                phase == 'server' and exit_after_capture and record['capture'] >= 4
+                and (self.output.parent / (self.output.name + '-private-work') / 'fixture' / 'blue-captured.txt').exists())
             def finished(_):
                 hook('finish', phase)
                 return {'exit_code': 7 if phase == 'server' else 0}
@@ -436,6 +447,16 @@ class LocalRunOrchestrationContracts(unittest.TestCase):
         def capture(*_):
             record['capture'] += 1
             hook('capture', 'client')
+            if capture_success:
+                fixture = self.output.parent / (self.output.name + '-private-work') / 'fixture'
+                phase = 'red' if record['capture'] <= 2 else 'blue'
+                (fixture / 'client.txt').write_text('guest=1;version=516;build=1688')
+                (fixture / 'phase.txt').write_text(phase)
+                image = Image.new('RGB', (224, 224), phase)
+                image.paste((0, 255, 0), (96, 96, 128, 128))
+                if finish_fixture is not True and record['capture'] == 4:
+                    self.clock.mono = 103.8
+                return image
             raise ValueError('primary capture failure')
 
         fake_socket = Mock()
@@ -461,11 +482,14 @@ class LocalRunOrchestrationContracts(unittest.TestCase):
                 patch.object(module.socket, 'socket', fake_socket), \
                 patch.object(module, 'desktop_capture', side_effect=capture):
             try:
-                module.run(self.output, self.admission, reviewed, **({'budget': budget} if budget is not None else {}))
+                with redirect_stdout(io.StringIO()):
+                    module.run(self.output, self.admission, reviewed, **({'budget': budget} if budget is not None else {}))
             except BaseException as error:
                 record['error'] = error
         receipt = self.output / 'receipt.json'
         record['receipt'] = json.loads(receipt.read_text()) if receipt.exists() else None
+        fixture = self.output.parent / (self.output.name + '-private-work') / 'fixture'
+        record['fixture_complete'] = (fixture / 'complete.txt').exists()
         return record
 
     def disk(self, hook):
@@ -750,6 +774,97 @@ class LocalRunOrchestrationContracts(unittest.TestCase):
                             for row in record['receipt']['secondary_errors']))
         self.assertTrue(any('Receipt cap exceeded' in note for note in record['error'].__notes__))
 
+    def assert_missing_fixture_completion_rejected(self, module=run):
+        record = self.invoke(module=module, capture_success=True, finish_fixture=False)
+        self.assertIn('error', record)
+        self.assertFalse(record['fixture_complete'])
+        self.assertNotIn('PASS', record['receipt']['result'])
+        self.assertEqual([phase for phase, _ in record['cleanup']], ['client', 'server', 'compile'])
+
+    def test_missing_fixture_completion_cannot_report_success(self):
+        self.assert_missing_fixture_completion_rejected()
+
+    def test_missing_completion_guard_negative_control_is_detected(self):
+        import types
+        module = types.ModuleType('missing_completion_guard_mutant')
+        module.__file__ = str(run.ROOT / 'run.py')
+        source = (run.ROOT / 'run.py').read_text()
+        start = source.index("        completion = fixture / 'complete.txt'\n")
+        end = source.index("        evidence['client'] = receipt\n", start)
+        changed = source[:start] + source[end:]
+        exec(compile(changed, module.__file__, 'exec'), module.__dict__)
+        with self.assertRaises(AssertionError):
+            self.assert_missing_fixture_completion_rejected(module)
+
+    def test_success_waits_for_fixture_completion(self):
+        record = self.invoke(capture_success=True)
+        self.assertNotIn('error', record)
+        self.assertTrue(record['fixture_complete'])
+        retained = self.output / 'fixture-complete.txt'
+        self.assertEqual(retained.read_bytes(), b'complete')
+        self.assertEqual(record['receipt']['fixture_completion'],
+                         {'sha256': hashlib.sha256(b'complete').hexdigest(), 'bytes': 8})
+        self.assertEqual(record['receipt']['result'], 'PASS native guest renderer smoke, composition UNTESTED')
+
+    def test_bad_fixture_completion_cannot_report_success(self):
+        record = self.invoke(capture_success=True, finish_fixture='incomplete')
+        self.assertIn('error', record)
+        self.assertTrue(record['fixture_complete'])
+        self.assertNotIn('PASS', record['receipt']['result'])
+
+    def test_oversized_fixture_completion_cannot_report_success(self):
+        record = self.invoke(capture_success=True, finish_fixture='x' * 17)
+        self.assertEqual(str(record['error']), 'Invalid fixture completion marker')
+        self.assertNotIn('PASS', record['receipt']['result'])
+
+    def test_server_exit_after_capture_cannot_report_success(self):
+        record = self.invoke(capture_success=True, finish_fixture=False, exit_after_capture=True)
+        self.assertEqual(str(record['error']), 'Client/server exited before fixture completion')
+        self.assertFalse(record['fixture_complete'])
+        self.assertNotIn('PASS', record['receipt']['result'])
+
+    def test_completion_copy_failure_preserves_captures_and_cleanup(self):
+        original = Path.open
+        def fail_completion(path, *args, **kwargs):
+            if path.name == 'fixture-complete.txt' and args and args[0] == 'xb':
+                raise OSError('injected completion evidence copy failure')
+            return original(path, *args, **kwargs)
+        with patch.object(Path, 'open', fail_completion):
+            record = self.invoke(capture_success=True)
+        self.assertEqual(str(record['error']), 'injected completion evidence copy failure')
+        self.assertNotIn('PASS', record['receipt']['result'])
+        self.assertEqual(set(record['receipt']['captures']), {'red', 'blue'})
+        self.assertTrue((self.output / 'red.png').is_file())
+        self.assertTrue((self.output / 'blue.png').is_file())
+        self.assertEqual([phase for phase, _ in record['cleanup']], ['client', 'server', 'compile'])
+
+    def test_completion_flush_failure_never_attests_the_marker(self):
+        original = run.os.fsync
+        calls = []
+        def fail_second_fsync(fd):
+            calls.append(fd)
+            if len(calls) == 2:
+                raise OSError('injected completion flush failure')
+            return original(fd)
+        with patch.object(run.os, 'fsync', side_effect=fail_second_fsync):
+            record = self.invoke(capture_success=True)
+        self.assertEqual(str(record['error']), 'injected completion flush failure')
+        self.assertNotIn('PASS', record['receipt']['result'])
+        self.assertNotIn('fixture_completion', record['receipt'])
+        self.assertEqual(set(record['receipt']['captures']), {'red', 'blue'})
+        self.assertEqual([phase for phase, _ in record['cleanup']], ['client', 'server', 'compile'])
+
+    def test_completed_fixture_evidence_survives_receipt_overflow(self):
+        with patch.object(run, 'write_final_receipt', side_effect=RuntimeError('Receipt cap exceeded')):
+            record = self.invoke(capture_success=True)
+        self.assertIn('Receipt cap exceeded', str(record['error']))
+        self.assertNotIn('PASS', record['receipt']['result'])
+        self.assertEqual(record['receipt']['fixture_completion'],
+                         {'sha256': hashlib.sha256(b'complete').hexdigest(), 'bytes': 8})
+        self.assertEqual((self.output / 'fixture-complete.txt').read_bytes(), b'complete')
+        self.assertEqual(set(record['receipt']['captures']), {'red', 'blue'})
+        self.assertEqual([phase for phase, _ in record['cleanup']], ['client', 'server', 'compile'])
+
 
 class ReceiptPersistenceContracts(unittest.TestCase):
     def setUp(self):
@@ -771,7 +886,7 @@ class ReceiptPersistenceContracts(unittest.TestCase):
         self.evidence['large_diagnostic'] = 'x' * 65536
         run.write_receipt_checkpoint(self.output, self.evidence)
         with self.assertRaisesRegex(RuntimeError, 'Receipt cap exceeded'):
-            run.write_final_receipt(self.output, self.evidence)
+            run.write_final_receipt(self.output, self.evidence, Mock())
         receipt = json.loads((self.output / 'receipt.json').read_text())
         self.assertEqual(receipt['result'], 'FAIL; receipt finalization unconfirmed')
         self.assertEqual(receipt['error'], 'primary failure')
@@ -786,14 +901,36 @@ class ReceiptPersistenceContracts(unittest.TestCase):
         before = (self.output / 'receipt.json').read_bytes()
         with patch.object(run.os, 'replace', side_effect=OSError('injected replace failure')):
             with self.assertRaisesRegex(OSError, 'injected replace failure'):
-                run.write_final_receipt(self.output, self.evidence)
+                run.write_final_receipt(self.output, self.evidence, Mock())
         self.assertEqual((self.output / 'receipt.json').read_bytes(), before)
         self.assertFalse((self.output / 'receipt.json.pending').exists())
 
     def test_valid_final_receipt_atomically_replaces_checkpoint(self):
         run.write_receipt_checkpoint(self.output, self.evidence)
-        run.write_final_receipt(self.output, self.evidence)
+        budget = Mock()
+        run.write_final_receipt(self.output, self.evidence, budget)
+        budget.check.assert_called_once_with(work=False)
         self.assertEqual(json.loads((self.output / 'receipt.json').read_text()), self.evidence)
+
+    def test_expiry_after_flush_preserves_the_failure_checkpoint(self):
+        self.evidence['result'] = 'PASS native guest renderer smoke, composition UNTESTED'
+        run.write_receipt_checkpoint(self.output, self.evidence)
+        before = (self.output / 'receipt.json').read_bytes()
+        budget = Mock()
+        budget.check.side_effect = RuntimeError('deadline expired during flush')
+        with self.assertRaisesRegex(RuntimeError, 'deadline expired during flush'):
+            run.write_final_receipt(self.output, self.evidence, budget)
+        self.assertEqual((self.output / 'receipt.json').read_bytes(), before)
+        self.assertEqual(json.loads(before)['result'], 'FAIL; receipt finalization unconfirmed')
+        self.assertFalse((self.output / 'receipt.json.pending').exists())
+
+    def test_expiry_guard_after_replace_negative_control_is_detected(self):
+        def late_guard(output, evidence, budget):
+            run.atomic_receipt(output / 'receipt.json', run.receipt_bytes(evidence))
+            budget.check(work=False)
+        with patch.object(run, 'write_final_receipt', side_effect=late_guard):
+            with self.assertRaises(AssertionError):
+                self.test_expiry_after_flush_preserves_the_failure_checkpoint()
 
     def test_existing_pending_file_is_not_removed(self):
         pending = self.output / 'receipt.json.pending'

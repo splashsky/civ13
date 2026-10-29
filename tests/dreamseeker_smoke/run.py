@@ -47,7 +47,7 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def atomic_receipt(path, data):
+def atomic_receipt(path, data, before_replace=None):
     pending = path.with_name(path.name + '.pending')
     require(not path.is_symlink() and not pending.is_symlink(), 'Unsafe receipt path')
     created = False
@@ -57,6 +57,8 @@ def atomic_receipt(path, data):
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
+        if before_replace is not None:
+            before_replace()
         os.replace(pending, path)
     finally:
         if created and pending.exists():
@@ -72,14 +74,16 @@ def receipt_bytes(value):
 def write_receipt_checkpoint(output, evidence):
     # This is deliberately not a success receipt. Captures are already stored in
     # output; keep their identities and every bounded cleanup result on failure.
-    keys = ('scope', 'head', 'local_admission', 'error', 'captures', 'cleanup', 'secondary_errors')
+    keys = ('scope', 'head', 'local_admission', 'error', 'captures', 'fixture_completion',
+            'cleanup', 'secondary_errors')
     checkpoint = {key: evidence[key] for key in keys if key in evidence}
     checkpoint['result'] = 'FAIL; receipt finalization unconfirmed'
     atomic_receipt(output / 'receipt.json', receipt_bytes(checkpoint))
 
 
-def write_final_receipt(output, evidence):
-    atomic_receipt(output / 'receipt.json', receipt_bytes(evidence))
+def write_final_receipt(output, evidence, budget):
+    atomic_receipt(output / 'receipt.json', receipt_bytes(evidence),
+                   before_replace=lambda: budget.check(work=False))
 
 
 def exit_observations(roles):
@@ -585,6 +589,31 @@ def run(output, local_admission=None, reviewed_admission_sha256=None, *, budget=
                     check_work()
                     break
                 previous = pixels
+        completion = fixture / 'complete.txt'
+        while True:
+            watch()
+            if client.exited(playing) or server.exited(serving):
+                evidence['pre_cleanup_exits'] = exit_observations((
+                    ('client', client, playing), ('server', server, serving)))
+                raise RuntimeError('Client/server exited before fixture completion')
+            check_work()
+            if completion.exists():
+                require(completion.is_file() and not completion.is_symlink()
+                        and completion.stat().st_size <= 16, 'Invalid fixture completion marker')
+                with completion.open('rb') as stream:
+                    marker = stream.read(17)
+                require(len(marker) <= 16, 'Fixture completion marker exceeds bound')
+                if marker.strip() == b'complete':
+                    check_work()
+                    retained = output / 'fixture-complete.txt'
+                    with retained.open('xb') as stream:
+                        stream.write(marker)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    check_work()
+                    require(retained.read_bytes() == marker, 'Fixture completion evidence changed')
+                    evidence['fixture_completion'] = {'sha256': digest(retained), 'bytes': len(marker)}
+                    break
         evidence['client'] = receipt
         check_work()
         evidence['result'] = 'PASS native guest renderer smoke, composition UNTESTED'
@@ -615,7 +644,7 @@ def run(output, local_admission=None, reviewed_admission_sha256=None, *, budget=
         try:
             write_receipt_checkpoint(output, evidence)
             budget.check(work=False)
-            write_final_receipt(output, evidence)
+            write_final_receipt(output, evidence, budget)
             budget.check(work=False)
         except BaseException as error:
             secondary.append({'phase': 'receipt', 'error': str(error)[:1024]})

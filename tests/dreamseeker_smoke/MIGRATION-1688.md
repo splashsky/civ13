@@ -83,8 +83,9 @@ checkout, all five spent claims and the fifth receipt SHA256
    reads per phase. Require full-frame exact geometry/pixels, phase/client
    receipts and final completion marker. No synthetic image, prompt interaction,
    existing-client takeover or production-lighting acceptance.
-6. Existing owner retains bounded logs, receipts and two PNGs only through its
-   reviewed artifact allowlist; never upload private environment/cache trees.
+6. Existing owner retains bounded logs, receipts, the <=16-byte fixture
+   completion marker and two PNGs only through its reviewed artifact allowlist;
+   never upload private environment/cache trees.
    Proposed ceiling: six logs<=1MiB each, two PNGs<=1MiB each, receipts<=64KiB,
    <=12 files and<=9MiB aggregate. No vendor binaries or resource caches.
    Confirm every owned exit/handle/Job cleanup before reporting success. On

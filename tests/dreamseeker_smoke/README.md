@@ -61,8 +61,9 @@ It saves those unmodified PNGs, exact source/vendor hashes and owned cleanup
 receipts. Synthetic unit images only test the color oracle. They are never saved
 as native captures. No renderer compatibility is established before CI runs.
 
-Only evidence-directory logs (1MiB monitored bound each), two bounded PNGs and
-JSON receipts are uploaded, not compiled resource caches or vendor binaries.
+Only evidence-directory logs (1MiB monitored bound each), two bounded PNGs, the
+bounded fixture completion marker and JSON receipts are uploaded, not compiled
+resource caches or vendor binaries.
 Any failure stops here; do not use account login, administrator overrides,
 firewall changes or RDP to make the hosted smoke pass.
 
@@ -181,6 +182,13 @@ must be smaller than 64 KiB. If final serialization or replacement fails, the
 checkpoint remains failure evidence; saved capture files are not removed. This
 standalone two-image smoke has no flax-video take, checks or viewport files, and
 does not establish the separate capture controller's acceptance.
+Success requires the fixture's exact completion marker after both captures; its
+bytes are retained independently and bound into the receipt by hash. The final
+receipt checks the shared budget after its temporary file is flushed
+and before replacement. An OS replacement can itself overrun; if the subsequent
+check and corrective write both fail, a stale success receipt can remain. Treat
+the runner's successful exit and its complete receipt together as necessary for
+acceptance; the receipt alone cannot establish success.
 The 512MiB per-process cap is hard; CPU, socket and log checks are sampled, and
 the 128MiB watcher check is preflight, not a hard parent cap. No outer local
 supervisor is implemented here, so a blocked OS call is not a hard 165-second

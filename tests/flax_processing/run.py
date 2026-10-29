@@ -86,7 +86,9 @@ def main(session=None):
              'code/modules/persistence/loading.dm', 'code/modules/persistence/functions.dm',
              'config/crafting/material_recipes_global.txt', 'code/modules/research_tree/research_node.dm',
              'tests/flax_processing/probe.dm', 'tests/flax_processing/run.py',
-             'scripts/byond_runtime.py', 'scripts/byond_toolchain.py', 'tools/byond/version.json']
+             'scripts/byond_runtime.py', 'scripts/byond_toolchain.py', 'scripts/native_fixture.py',
+             'tests/floor_decal_tracking/windows.py', 'tests/floor_decal_tracking/guard_config.py',
+             'tests/floor_decal_tracking/owned_job.py', 'tools/byond/version.json']
     metadata = {'head_sha': commit, 'control': args.negative_control,
                 'expected_byond_version': requirement['version'],
                 'source_sha256': {p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest() for p in paths}}

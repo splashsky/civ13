@@ -54,7 +54,9 @@ class FlaxRunnerContracts(unittest.TestCase):
                              'code/modules/persistence/loading.dm', 'code/modules/persistence/functions.dm',
                              'config/crafting/material_recipes_global.txt', 'code/modules/research_tree/research_node.dm',
                              'tests/flax_processing/probe.dm', 'tests/flax_processing/run.py',
-                             'scripts/byond_runtime.py', 'scripts/byond_toolchain.py', 'tools/byond/version.json'):
+                             'scripts/byond_runtime.py', 'scripts/byond_toolchain.py', 'scripts/native_fixture.py',
+                             'tests/floor_decal_tracking/windows.py', 'tests/floor_decal_tracking/guard_config.py',
+                             'tests/floor_decal_tracking/owned_job.py', 'tools/byond/version.json'):
                 target = root / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes((ROOT / relative).read_bytes())
@@ -117,7 +119,10 @@ class FlaxRunnerContracts(unittest.TestCase):
                     runner.main(session=session)
             else:
                 runner.main(session=session)
-                self.assertEqual(json.loads((output / 'metadata.json').read_text())['expected_byond_version'], '516.1688')
+                metadata = json.loads((output / 'metadata.json').read_text())
+                self.assertEqual(metadata['expected_byond_version'], '516.1688')
+                self.assertIn('scripts/native_fixture.py', metadata['source_sha256'])
+                self.assertIn('tests/floor_decal_tracking/owned_job.py', metadata['source_sha256'])
                 self.assertEqual(json.loads((output / 'compiler-runtime.json').read_text()), identity)
                 self.assertEqual(json.loads((output / 'daemon-runtime.json').read_text()), identity)
             if defect == 'cleanup_unconfirmed':

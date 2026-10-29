@@ -727,19 +727,80 @@ class LocalRunOrchestrationContracts(unittest.TestCase):
         self.assertEqual(record['receipt']['result'], 'FAIL; receipt finalization unconfirmed')
 
     def test_receipt_write_failures_do_not_replace_primary_or_skip_cleanup(self):
-        original = Path.write_text
         attempts = []
-        def failed_receipt(path, *args, **kwargs):
-            if path.name == 'receipt.json':
-                attempts.append(path)
-                raise OSError('injected diagnostic receipt write failure')
-            return original(path, *args, **kwargs)
-        with patch.object(Path, 'write_text', failed_receipt):
+        def failed_receipt(path, _data):
+            attempts.append(path)
+            raise OSError('injected diagnostic receipt write failure')
+        with patch.object(run, 'atomic_receipt', failed_receipt):
             record = self.invoke()
         self.assertEqual(str(record['error']), 'primary capture failure')
         self.assertEqual([p for p, _ in record['cleanup']], ['client', 'server', 'compile'])
         self.assertEqual(len(attempts), 2)
         self.assertTrue(any('receipt write failure' in note for note in record['error'].__notes__))
+
+    def test_final_receipt_overflow_keeps_cleanup_and_original_failure(self):
+        with patch.object(run, 'write_final_receipt', side_effect=RuntimeError('Receipt cap exceeded')):
+            record = self.invoke()
+        self.assertEqual(str(record['error']), 'primary capture failure')
+        self.assertEqual(record['receipt']['error'], 'primary capture failure')
+        self.assertEqual(record['receipt']['result'], 'FAIL; receipt finalization unconfirmed')
+        self.assertEqual([row['phase'] for row in record['receipt']['cleanup']],
+                         ['client', 'server', 'compile'])
+        self.assertTrue(any('Receipt cap exceeded' in row['error']
+                            for row in record['receipt']['secondary_errors']))
+        self.assertTrue(any('Receipt cap exceeded' in note for note in record['error'].__notes__))
+
+
+class ReceiptPersistenceContracts(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.output = Path(self.temp.name)
+        self.evidence = {
+            'scope': 'offline mock only', 'head': 'offline-head',
+            'result': 'FAIL; no native acceptance', 'error': 'primary failure',
+            'captures': {'red': {'sha256': 'a' * 64, 'size': [224, 224]}},
+            'cleanup': [{'phase': 'client', 'all_exited': False, 'error': 'uncertain'},
+                        {'phase': 'server', 'all_exited': True}],
+            'secondary_errors': [{'phase': 'client', 'error': 'uncertain'}],
+        }
+
+    def test_oversized_final_receipt_preserves_bounded_failure_checkpoint(self):
+        capture = self.output / 'red.png'
+        capture.write_bytes(b'offline capture placeholder')
+        self.evidence['large_diagnostic'] = 'x' * 65536
+        run.write_receipt_checkpoint(self.output, self.evidence)
+        with self.assertRaisesRegex(RuntimeError, 'Receipt cap exceeded'):
+            run.write_final_receipt(self.output, self.evidence)
+        receipt = json.loads((self.output / 'receipt.json').read_text())
+        self.assertEqual(receipt['result'], 'FAIL; receipt finalization unconfirmed')
+        self.assertEqual(receipt['error'], 'primary failure')
+        self.assertEqual(receipt['cleanup'], self.evidence['cleanup'])
+        self.assertEqual(receipt['captures'], self.evidence['captures'])
+        self.assertFalse(receipt['cleanup'][0]['all_exited'])
+        self.assertEqual(capture.read_bytes(), b'offline capture placeholder')
+        self.assertLess((self.output / 'receipt.json').stat().st_size, 65536)
+
+    def test_failed_atomic_final_replace_keeps_checkpoint(self):
+        run.write_receipt_checkpoint(self.output, self.evidence)
+        before = (self.output / 'receipt.json').read_bytes()
+        with patch.object(run.os, 'replace', side_effect=OSError('injected replace failure')):
+            with self.assertRaisesRegex(OSError, 'injected replace failure'):
+                run.write_final_receipt(self.output, self.evidence)
+        self.assertEqual((self.output / 'receipt.json').read_bytes(), before)
+        self.assertFalse((self.output / 'receipt.json.pending').exists())
+
+    def test_valid_final_receipt_atomically_replaces_checkpoint(self):
+        run.write_receipt_checkpoint(self.output, self.evidence)
+        run.write_final_receipt(self.output, self.evidence)
+        self.assertEqual(json.loads((self.output / 'receipt.json').read_text()), self.evidence)
+
+    def test_existing_pending_file_is_not_removed(self):
+        pending = self.output / 'receipt.json.pending'
+        pending.write_bytes(b'preexisting')
+        with self.assertRaises(FileExistsError):
+            run.write_receipt_checkpoint(self.output, self.evidence)
+        self.assertEqual(pending.read_bytes(), b'preexisting')
 
 
 class BudgetContracts(unittest.TestCase):

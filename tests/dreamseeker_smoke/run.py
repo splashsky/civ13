@@ -20,6 +20,7 @@ from guard_config import VENDOR, LIMITS, digest
 from entry_budget import Budget
 
 ROOT = Path(__file__).resolve().parent
+RECEIPT_CAP = 65536
 INSTALLED_MANIFEST_SHA256 = None  # Fresh 1688 installed-runtime review is pending.
 INSTALLED_MANIFEST_SHAPE = None
 LOCAL_RUNTIME_DLLS = ('mfc140u.dll', 'msvcp140.dll', 'vcruntime140.dll')
@@ -44,6 +45,41 @@ def pillow_identity():
 def require(condition, message):
     if not condition:
         raise RuntimeError(message)
+
+
+def atomic_receipt(path, data):
+    pending = path.with_name(path.name + '.pending')
+    require(not path.is_symlink() and not pending.is_symlink(), 'Unsafe receipt path')
+    created = False
+    try:
+        with pending.open('xb') as stream:
+            created = True
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(pending, path)
+    finally:
+        if created and pending.exists():
+            pending.unlink()
+
+
+def receipt_bytes(value):
+    raw = (json.dumps(value, separators=(',', ':'), allow_nan=False) + '\n').encode('utf-8')
+    require(len(raw) < RECEIPT_CAP, 'Receipt cap exceeded')
+    return raw
+
+
+def write_receipt_checkpoint(output, evidence):
+    # This is deliberately not a success receipt. Captures are already stored in
+    # output; keep their identities and every bounded cleanup result on failure.
+    keys = ('scope', 'head', 'local_admission', 'error', 'captures', 'cleanup', 'secondary_errors')
+    checkpoint = {key: evidence[key] for key in keys if key in evidence}
+    checkpoint['result'] = 'FAIL; receipt finalization unconfirmed'
+    atomic_receipt(output / 'receipt.json', receipt_bytes(checkpoint))
+
+
+def write_final_receipt(output, evidence):
+    atomic_receipt(output / 'receipt.json', receipt_bytes(evidence))
 
 
 def exit_observations(roles):
@@ -577,14 +613,16 @@ def run(output, local_admission=None, reviewed_admission_sha256=None, *, budget=
         if primary is not None or secondary:
             evidence['result'] = 'FAIL; no native acceptance'
         try:
-            (output/'receipt.json').write_text(json.dumps(evidence, indent=2))
+            write_receipt_checkpoint(output, evidence)
+            budget.check(work=False)
+            write_final_receipt(output, evidence)
             budget.check(work=False)
         except BaseException as error:
             secondary.append({'phase': 'receipt', 'error': str(error)[:1024]})
             evidence['result'] = 'FAIL; receipt finalization unconfirmed'
             # One bounded corrective diagnostic write, no process or run retry.
             try:
-                (output/'receipt.json').write_text(json.dumps(evidence, indent=2))
+                write_receipt_checkpoint(output, evidence)
             except BaseException as receipt_error:
                 secondary.append({'phase': 'receipt-write', 'error': str(receipt_error)[:1024]})
         if primary is not None:

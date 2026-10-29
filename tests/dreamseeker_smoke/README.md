@@ -175,6 +175,12 @@ recorded, with a best-effort receipt even on failure. Receipt I/O failure is
 reported alongside the primary error; one corrective diagnostic write is allowed,
 never a process/run retry. Receipt-write budget overrun changes its result to
 failure and cannot produce successful runner return.
+After cleanup, a compact failure checkpoint containing the cleanup and capture
+identities is atomically written before the full terminal receipt. Both receipts
+must be smaller than 64 KiB. If final serialization or replacement fails, the
+checkpoint remains failure evidence; saved capture files are not removed. This
+standalone two-image smoke has no flax-video take, checks or viewport files, and
+does not establish the separate capture controller's acceptance.
 The 512MiB per-process cap is hard; CPU, socket and log checks are sampled, and
 the 128MiB watcher check is preflight, not a hard parent cap. No outer local
 supervisor is implemented here, so a blocked OS call is not a hard 165-second

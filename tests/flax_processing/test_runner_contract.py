@@ -66,6 +66,8 @@ class FlaxRunnerContracts(unittest.TestCase):
             output = root / 'evidence'
             events, launches = [], []
             identity = {'version': '516.1688', 'identity_basis': 'injected-offline-test'}
+            session = NS(phases=[])
+            runtime = root / 'runtime'
 
             def verify(binary, archive):
                 events.append('identity')
@@ -73,8 +75,11 @@ class FlaxRunnerContracts(unittest.TestCase):
                     raise ValueError('injected archive/member mismatch')
                 return identity
 
-            def launch(command, **kwargs):
+            def launch(actual_session, command, **kwargs):
+                self.assertIs(actual_session, session)
                 launches.append(kwargs)
+                session.phases.append({'owned_exit_evidence_complete': not (
+                    defect == 'cleanup_unconfirmed' and kwargs['phase'] == 'flax-runtime')})
                 if len(launches) == 1:
                     events.append('compile')
                     dme = Path(command[-1])
@@ -84,30 +89,45 @@ class FlaxRunnerContracts(unittest.TestCase):
                     return NS(returncode=0, stdout=f'DM compiler version {version}\nprobe.dmb - 0 errors, 0 warnings\n', stderr='')
                 events.append('daemon')
                 self.assertIn('-trusted', command)
+                self.assertIn('-nowebclient', command)
+                self.assertEqual(command[command.index('-ip') + 1], '127.0.0.1')
                 work = kwargs['cwd']
+                self.assertEqual(kwargs['state_directory'], work)
+                if defect == 'cleanup_unconfirmed':
+                    raise RuntimeError('injected unconfirmed owned cleanup')
                 (work / 'result.txt').write_text('PASS: flax processing and native disk round trips')
                 (work / 'runtime.log').write_text('offline injected runner test')
                 return NS(returncode=0, stdout='', stderr='')
 
+            def make_runtime(**kwargs):
+                runtime.mkdir()
+                return str(runtime)
+
             stack.enter_context(patch.object(runner, 'ROOT', root))
             stack.enter_context(patch.object(runner, 'runtime_identity', side_effect=verify))
             stack.enter_context(patch.object(runner.subprocess, 'check_output', side_effect=['a' * 40, b'']))
-            stack.enter_context(patch.object(runner.subprocess, 'run', side_effect=launch))
+            stack.enter_context(patch.object(runner, 'run_native', side_effect=launch))
+            stack.enter_context(patch.object(runner.tempfile, 'mkdtemp', side_effect=make_runtime))
             stack.enter_context(patch.object(runner.sys, 'argv', ['run.py', '--byond-bin', str(root / 'bin'),
                 '--byond-archive', str(root / 'pinned.zip'), '--output', str(output)]))
             # Synthetic native-result text must not look like real acceptance.
             stack.enter_context(redirect_stdout(io.StringIO()))
             if defect:
                 with self.assertRaises((RuntimeError, ValueError)):
-                    runner.main()
+                    runner.main(session=session)
             else:
-                runner.main()
+                runner.main(session=session)
                 self.assertEqual(json.loads((output / 'metadata.json').read_text())['expected_byond_version'], '516.1688')
                 self.assertEqual(json.loads((output / 'compiler-runtime.json').read_text()), identity)
                 self.assertEqual(json.loads((output / 'daemon-runtime.json').read_text()), identity)
-            self.assertEqual(list(root.glob('.flax_probe_*')), [], 'generated fixture files must be cleaned')
+            if defect == 'cleanup_unconfirmed':
+                self.assertTrue(list(root.glob('.flax_probe_*')), 'uncertain owned processes require retained fixture files')
+                self.assertTrue(runtime.is_dir(), 'uncertain owned processes require retained runtime files')
+            else:
+                self.assertEqual(list(root.glob('.flax_probe_*')), [], 'generated fixture files must be cleaned')
+                self.assertFalse(runtime.exists(), 'confirmed runtime files must be cleaned')
             if launches:
-                self.assertEqual(launches[0]['timeout'], 180)
+                self.assertEqual(launches[0]['timeout'], 120)
             if len(launches) == 2:
                 self.assertEqual(launches[1]['timeout'], 45)
             if defect == 'old_banner':
@@ -125,6 +145,9 @@ class FlaxRunnerContracts(unittest.TestCase):
         ):
             with self.subTest(defect=defect):
                 self.assertEqual(self.exercise(defect), expected)
+
+    def test_unconfirmed_cleanup_retains_the_exact_fixture_and_runtime(self):
+        self.assertEqual(self.exercise('cleanup_unconfirmed'), ['identity', 'compile', 'identity', 'daemon'])
 
     def test_all_three_existing_mutation_controls_still_have_unique_targets(self):
         self.assertEqual(set(runner.CONTROLS), {'payment', 'replay', 'persistence'})

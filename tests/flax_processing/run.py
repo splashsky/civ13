@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import byond_runtime
 import byond_toolchain
+from native_fixture import Session, no_port_args, run_native
 
 CORE = 'code/modules/1713/flax_processing.dm'
 CONTROLS = {
@@ -53,7 +54,7 @@ def source_for(control):
     return source
 
 
-def main():
+def main(session=None):
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument('--byond-bin', type=Path)
     parser.add_argument('--byond-archive', type=Path)
@@ -77,7 +78,6 @@ def main():
     binary = args.byond_bin.absolute()  # Preserve links/traversal for identity rejection.
     compiler = binary / ('dm.exe' if os.name == 'nt' else 'DreamMaker')
     daemon = binary / ('dd.exe' if os.name == 'nt' else 'DreamDaemon')
-    flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
     prefix = '.flax_probe_' + uuid.uuid4().hex
     generated = [ROOT / (prefix + suffix) for suffix in
                  ('.dme', '_world.dm', '_globals.dm', '_flax.dm', '.dmb', '.rsc')]
@@ -92,6 +92,9 @@ def main():
                 'source_sha256': {p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest() for p in paths}}
     (args.output / 'metadata.json').write_text(json.dumps(metadata, indent=2), encoding='utf-8')
     (args.output / 'tested.patch').write_bytes(subprocess.check_output(['git', 'diff', 'HEAD'], cwd=ROOT))
+    if os.name == 'nt' and session is None:
+        session = Session(args.output / 'supervisor', commit)
+    work = None
     try:
         world = (ROOT / 'code/world.dm').read_text(encoding='utf-8')
         start = world.index('/world/New()')
@@ -120,40 +123,45 @@ def main():
         generated[0].write_text(source + '\n#include "tests/flax_processing/probe.dm"\n', encoding='utf-8')
         identity = runtime_identity(binary, args.byond_archive)
         (args.output / 'compiler-runtime.json').write_text(json.dumps(identity, indent=2), encoding='utf-8')
-        build = subprocess.run([str(compiler), '-max_errors', '0', str(generated[0])],
-                               cwd=ROOT, capture_output=True, text=True, timeout=180, creationflags=flags)
+        build = run_native(session, [str(compiler), '-max_errors', '0', str(generated[0])],
+                           cwd=ROOT, phase='flax-compile', timeout=120 if session is not None else 180,
+                           artifacts=generated[4:])
         output = build.stdout + build.stderr
         (args.output / 'compile.log').write_text(output, encoding='utf-8')
         check_compile(build, requirement['version'])
-        with tempfile.TemporaryDirectory(prefix='civ13-flax-runtime-') as temporary:
-            work = Path(temporary)
-            for path in generated[4:]:
-                shutil.copy2(path, work / path.name)
-            shutil.copytree(ROOT / 'config/names', work / 'config/names')
-            (work / 'config/crafting').mkdir(parents=True)
-            shutil.copy2(ROOT / 'config/crafting/material_recipes_global.txt', work / 'config/crafting/material_recipes_global.txt')
-            identity = runtime_identity(binary, args.byond_archive)
-            (args.output / 'daemon-runtime.json').write_text(json.dumps(identity, indent=2), encoding='utf-8')
-            result = subprocess.run([str(daemon), str(work / generated[4].name),
-                                     *(['-invisible', '-close'] if os.name == 'nt' else []),
-                                     '-trusted', '-log', 'runtime.log'], cwd=work,
-                                    capture_output=True, text=True, timeout=45, creationflags=flags)
-            diagnostics = result.stdout + result.stderr
-            for filename in ('runtime.log', 'errors.txt', 'result.txt', 'fixture.json'):
-                path = work / filename
-                if path.exists():
-                    shutil.copy2(path, args.output / filename)
-                    if filename in ('runtime.log', 'errors.txt'):
-                        diagnostics += path.read_text(encoding='utf-8', errors='replace')
-            (args.output / 'daemon.log').write_text(result.stdout + result.stderr, encoding='utf-8')
-            actual = (work / 'result.txt').read_text(encoding='utf-8').strip() if (work / 'result.txt').exists() else ''
-            expected = CONTROLS[args.negative_control][2] if args.negative_control else 'PASS: flax processing and native disk round trips'
-            if result.returncode or actual != expected or any(marker in diagnostics.lower() for marker in ('runtime error:', 'bug:', '## error:')):
-                raise RuntimeError(f'Expected {expected!r}, got {actual!r}; diagnostics: {diagnostics[-2500:]}')
-            print(('PASS expected mutation: ' if args.negative_control else '') + actual)
+        work = Path(tempfile.mkdtemp(prefix='civ13-flax-runtime-'))
+        for path in generated[4:]:
+            shutil.copy2(path, work / path.name)
+        shutil.copytree(ROOT / 'config/names', work / 'config/names')
+        (work / 'config/crafting').mkdir(parents=True)
+        shutil.copy2(ROOT / 'config/crafting/material_recipes_global.txt', work / 'config/crafting/material_recipes_global.txt')
+        identity = runtime_identity(binary, args.byond_archive)
+        (args.output / 'daemon-runtime.json').write_text(json.dumps(identity, indent=2), encoding='utf-8')
+        result = run_native(session, [str(daemon), str(work / generated[4].name),
+                                      *(['-invisible', '-close'] if os.name == 'nt' else []),
+                                      *no_port_args(), '-trusted', '-log', 'runtime.log'],
+                            cwd=work, phase='flax-runtime', timeout=45, state_directory=work)
+        diagnostics = result.stdout + result.stderr
+        for filename in ('runtime.log', 'errors.txt', 'result.txt', 'fixture.json'):
+            path = work / filename
+            if path.exists():
+                shutil.copy2(path, args.output / filename)
+                if filename in ('runtime.log', 'errors.txt'):
+                    diagnostics += path.read_text(encoding='utf-8', errors='replace')
+        (args.output / 'daemon.log').write_text(result.stdout + result.stderr, encoding='utf-8')
+        actual = (work / 'result.txt').read_text(encoding='utf-8').strip() if (work / 'result.txt').exists() else ''
+        expected = CONTROLS[args.negative_control][2] if args.negative_control else 'PASS: flax processing and native disk round trips'
+        if result.returncode or actual != expected or any(marker in diagnostics.lower() for marker in ('runtime error:', 'bug:', '## error:')):
+            raise RuntimeError(f'Expected {expected!r}, got {actual!r}; diagnostics: {diagnostics[-2500:]}')
+        print(('PASS expected mutation: ' if args.negative_control else '') + actual)
     finally:
-        for path in generated:
-            path.unlink(missing_ok=True)
+        if session is None or all(phase.get('owned_exit_evidence_complete') for phase in session.phases):
+            for path in generated:
+                path.unlink(missing_ok=True)
+            if work is not None:
+                shutil.rmtree(work)
+        else:
+            print('Retaining generated fixture and runtime files: owned cleanup is unconfirmed', flush=True)
 
 
 if __name__ == '__main__':

@@ -17,6 +17,12 @@ its execution admission remain necessary. The first OpenDream attempt used an
 incorrect denied-move expectation; it failed and was corrected to reflect the
 production drop's floor staging rather than being counted as a pass.
 
+On Windows the runner now uses the shared native fixture supervisor, with a
+120-second compile bound, a 45-second runtime bound, loopback-only arguments and
+socket observation. Unconfirmed owned-process cleanup retains the generated
+source and temporary runtime directory. Offline tests inject the launch seam;
+the new Windows supervision has not itself been run natively for this fixture.
+
 Source-only proposal. No native compiler, daemon, client, capture or workflow
 was run for the original proposal below. Main owns independent review and any
 later admission.
@@ -118,8 +124,8 @@ After independent review and a separately authorized exact-head native grant:
 
 Python source/contract models cannot prove DM dispatch, implicit argument
 semantics, movement callbacks, native inventory/HUD cleanup, or genuine wait
-entry. The amended DM regression is prepared source and remains uncompiled and
-unrun until the separately admitted native phase.
+entry. The original source-only result did not include native execution; the later
+fixture preparation and its evidence are described above.
 
 ## Preserved CI failure and selected-runner correction
 
@@ -134,8 +140,8 @@ fixture did not admit `tests/animal_harvest`.
 The flax runner now reads the reviewed manifest, checks a single exact compiler
 banner and clean summary, and passively verifies the pinned Linux archive and its
 four installed runtime members immediately before each existing compiler/daemon
-launch. Offline tests inject these launch seams; they never launch BYOND. Existing
-180-second compile/45-second runtime bounds, isolation, output preservation,
-cleanup and payment/replay/persistence controls remain. No other frozen runner or
-native selection rule is changed. Ordinary PR CI may verify the prepared flax
-fixture; it still cannot establish production-human afterattack/HUD acceptance.
+launch. Offline tests inject these launch seams; they never launch BYOND. The
+compile bound is 120 seconds with Windows supervision and 180 seconds on Linux;
+the 45-second runtime bound and payment/replay/persistence controls remain. No
+other frozen runner or native selection rule is changed. A successful native
+fixture would exercise the headless human entry, not connected-client HUD acceptance.
